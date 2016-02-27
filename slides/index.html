@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+<meta charset="utf-8">
+
+<title>A Whirlwind tour of Levee</title>
+
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0,
+maximum-scale=1.0, user-scalable=no, minimal-ui">
+
+<link rel="stylesheet" href="css/reveal.css">
+<link rel="stylesheet" href="css/theme/moon.css" id="theme">
+
+<!-- Code syntax highlighting -->
+<link rel="stylesheet" href="lib/css/railscasts.css">
+
+<!--[if lt IE 9]>
+<script src="lib/js/html5shiv.js"></script>
+<![endif]-->
+</head>
+
+<body>
+<div class="reveal">
+<div class="slides">
+
+<section>
+<h1>Levee</h1>
+<h3>A Whirlwind Tour</h3>
+<p>
+<small><a href="https://twitter.com/cablelounger">Andy Gayton</a> / <a
+	href="https://twitter.com/cablelounger">@cablelounger</a></small>
+</p>
+</section>
+
+
+<section>
+<p>
+Levee is a tool to succinctly and quickly create high performance network appliances.
+</p>
+</section>
+
+
+<section>
+<h2>Here's how it looks</h2>
+<pre><code class="hljs" data-trim>
+local levee = require("levee")
+
+local h = levee.Hub()
+
+local err, serve = h.tcp:listen(9000)
+
+for conn in serve do
+  h:spawn(function()
+    while true do
+      local err = conn:write("Hello World\n")
+      if err then break end
+      h:sleep(1000)
+    end
+    conn:close()
+  end)
+end
+</code></pre>
+</section>
+
+
+<section data-markdown>
+<script type="text/template">
+## Major features
+
+  - Straight forward concurrency
+  - Build standalone static binaries
+  - Performance
+  - Single and Zero-copy networking
+    - e.g. Streaming JSON + Msgpack decoding, Splice, Tee
+  - Built-in Testing
+</script>
+</section>
+
+
+<section data-markdown>
+<script type="text/template">
+## Why Lua
+
+  - Built-in collaborative coroutines (Green threads)
+  - Tiny, easy to embed, (NGINX, Redis)
+  - LuaJIT
+  - Great FFI -- C.sleep(1)
+</script>
+</section>
+
+
+<section>
+<h2>Great FFI</h2>
+<pre><code class="hljs" data-trim>
+
+local pid = C.getpid()
+C.kill(pid, C.SIGHUP)
+
+
+</code></pre>
+</section>
+
+<section data-markdown>
+<script type="text/template">
+## Similar projects
+
+  - Luvit
+  - Implements the same APIs as Node.js, but in Lua!
+  - **WHY??**
+  - *'If you start with that sort of slogan there's no where you can go.'*
+  - also: libuv
+  - We don't love it
+</script>
+</section>
+
+<section>
+	<h2>Callback hell</h2>
+	<img src="callback_hell.png" />
+</section>
+
+<section data-markdown>
+<script type="text/template">
+## Swiss army knife
+
+  - TCP
+  - HTTP
+  - File IO
+  - Processes
+  - Threads
+  - Signals
+  - Consul
+</script>
+</section>
+
+
+<section>
+<h2>Chat relay</h2>
+<pre><code class="hljs" data-trim>
+local err, serve = h.tcp:listen(9000, "0.0.0.0")
+
+local connections = {}
+
+for conn in serve do
+  h:spawn(function()
+    connections[conn.no] = conn
+    local stream = conn:stream()
+    while true do
+      local err, line = stream:line("\r\n")
+      if err then break end
+      for __, item in pairs(connections) do
+        item:write(line.."\n")
+      end
+    end
+    conn:close()
+    connections[conn.no] = nil
+  end)
+end
+</code></pre>
+</section>
+
+<section data-markdown>
+<script type="text/template">
+## Project layout
+
+```
+./demo
+./demo/main.lua
+./demo/sedaas.lua
+./tests
+./tests/test_sedaas.lua
+```
+</script>
+</section>
+
+
+<section>
+<h2>demo/sedaas.lua</h2>
+<h3>Sed as a service</h3>
+<pre><code class="hljs" data-trim>
+return function(h)
+  local child = h.process:spawn(
+    "sed", {argv={"-l", "s/trump/orange pumpkin head/g"}})
+
+  local stream = child.stdout:stream()
+
+  return function(s)
+    child.stdin:send(s.."\n")
+    local err, line = stream:line()
+    return line
+  end
+end
+</code></pre>
+</section>
+
+
+<section>
+<h2>tests/test_sedaas.lua</h2>
+<pre><code class="hljs" data-trim>
+local levee = require("levee")
+local Sedaas = require("demo.sedaas")
+
+
+return {
+  test_core = function()
+    local h = levee.Hub()
+    local sedaas = Sedaas(h)
+    assert.equal(sedaas("foo"), "foo")
+    assert.equal(sedaas("trump card"), "orange pumpkin head card")
+  end,
+}
+</code></pre>
+</section>
+
+<section>
+	<h2>levee test</h2>
+	<img src="tests.png" />
+</section>
+
+
+<section>
+<h2>Add Sedaas to our chat relay</h2>
+<pre><code class="hljs" data-trim>
+      while true do
+        local err, line = stream:line("\r\n")
+        if err then break end
+
+        line = sedaas(line)
+
+        for __, item in pairs(connections) do
+          item:write(line.."\n")
+        end
+      end
+</code></pre>
+</section>
+
+<section>
+<h2>HTTP endpoint</h2>
+<h3>Metrics; whose connected?</h3>
+<pre><code class="hljs" data-trim>
+  local count = 0
+
+  local err, drop = h.http:droplet(8000, "0.0.0.0")
+
+  drop:route("/", function(h, req)
+    return ("connected: %s"):format(count)
+  end)
+</code></pre>
+</section>
+
+<section>
+<h2>HTTP Endpoint</h2>
+<pre><code class="hljs" data-trim>
+    h:spawn(function()
+      connections[conn.no] = conn
+      count = count + 1
+      local stream = conn:stream()
+      while true do
+        local err, line = stream:line("\r\n")
+        if err then break end
+        line = sedaas(line)
+        for __, item in pairs(connections) do
+          item:write(line.."\n")
+        end
+      end
+      conn:close()
+      count = count - 1
+      connections[conn.no] = nil
+    end)
+</code></pre>
+</section>
+
+
+<section>
+	<h2>levee build</h2>
+	<img src="build.png" />
+</section>
+
+
+<!--
+<section data-markdown>
+<script type="text/template">
+</script>
+</section>
+-->
+
+<section data-markdown>
+<script type="text/template">
+## Major features
+
+  - Straight forward concurrency
+  - Build standalone static binaries
+  - Performance
+  - Single and Zero-copy networking
+    - e.g. Streaming JSON + Msgpack decoding, Splice, Tee
+  - Built-in Testing
+</script>
+</section>
+
+
+<section data-markdown>
+<script type="text/template">
+## Swiss army knife
+
+  - TCP
+  - HTTP
+  - File IO
+  - Processes
+  - Threads
+  - Signals
+  - Consul
+</script>
+</section>
+
+
+<section>
+<h2>Try it out</h2>
+<p style="font-family: monospace"><small>brew install imgix/brew/levee</small></p>
+<p><a href="https://github.com/imgix/levee"><small>source / github</small></a></p>
+</section>
+
+<section style="text-align: left;">
+<h1>THE END</h1>
+</section>
+
+</div>
+</div>
+
+		<script src="lib/js/head.min.js"></script>
+		<script src="js/reveal.js"></script>
+
+		<script>
+			// Full list of configuration options available at:
+			// https://github.com/hakimel/reveal.js#configuration
+			Reveal.initialize({
+				controls: true,
+				progress: true,
+				history: true,
+				center: true,
+
+				transition: 'none',
+
+				// Optional reveal.js plugins
+				dependencies: [
+					{ src: 'lib/js/classList.js', condition: function() { return !document.body.classList; } },
+					{ src: 'plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+					{ src: 'highlight.pack.js', async: true, callback: function() { hljs.initHighlightingOnLoad(); } },
+					{ src: 'plugin/zoom-js/zoom.js', async: true },
+					{ src: 'plugin/notes/notes.js', async: true }
+				]
+			});
+
+		</script>
+
+	</body>
+</html>
